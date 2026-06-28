@@ -10,9 +10,13 @@ from langchain_openai import ChatOpenAI
 from langchain_openai import OpenAIEmbeddings
 from langchain_core.documents import Document
 
+import _ragas_compat  # noqa: F401  兼容垫片:必须在 import ragas 之前加载
+import config
+
 from ragas import EvaluationDataset, evaluate
-from ragas.metrics.collections.faithfulness import Faithfulness
-from ragas.metrics.collections.answer_relevancy import AnswerRelevancy
+# ragas 0.4.x 的 collections 指标要求 InstructorLLM;改用旧 ragas.metrics 路径
+# (旧 metric 类可直接接收 ChatOpenAI,避免降级到启发式)
+from ragas.metrics import Faithfulness, AnswerRelevancy
 
 import matplotlib.pyplot as plt
 import matplotlib
@@ -61,7 +65,7 @@ def data_fetcher(state: AgentState):
     print("[DataFetcher] Running")
 
     try:
-        app = FirecrawlApp(api_key=os.getenv("FIRECRAWL_API_KEY"))
+        app = FirecrawlApp(api_key=config.FIRECRAWL_API_KEY)
 
         messages = state["messages"]
         company_name = (
@@ -234,13 +238,27 @@ def bull_analyst(state: AgentState):
                 from langchain_community.vectorstores import FAISS
 
                 embeddings = OpenAIEmbeddings(
-                    base_url="https://api.siliconflow.cn/v1",
-                    api_key=os.getenv("SILICONFLOW_API_KEY"),
-                    model="BAAI/bge-large-en-v1.5"
+                    base_url=config.SILICONFLOW_BASE_URL,
+                    api_key=config.SILICONFLOW_API_KEY,
+                    model=config.SILICONFLOW_EMBED_MODEL,
+                    # BGE 模型上下文 512 token,langchain 默认批量=1000 容易触发 SiliconFlow 400
+                    chunk_size=10,
                 )
 
                 chunks = research_context.split("\n\n---\n\n")
-                documents = [Document(page_content=chunk) for chunk in chunks if chunk.strip()]
+                documents = []
+                _MAX_CHARS = 1200  # BGE 模型 512 token 限制,保险取 1200 字符
+                for _chunk in chunks:
+                    if not _chunk.strip():
+                        continue
+                    if len(_chunk) > _MAX_CHARS:
+                        _step = _MAX_CHARS - 100
+                        for _i in range(0, len(_chunk), _step):
+                            _sub = _chunk[_i:_i + _MAX_CHARS]
+                            if _sub.strip():
+                                documents.append(Document(page_content=_sub))
+                    else:
+                        documents.append(Document(page_content=_chunk))
 
                 if len(documents) > 0:
                     if len(documents) > 30:
@@ -312,9 +330,9 @@ def bull_analyst(state: AgentState):
                     print(f"[BullAnalyst] Keyword filter: {len(chunks)} -> {len(relevant_chunks)} bullish chunks")
 
         llm = ChatOpenAI(
-            base_url="https://api.siliconflow.cn/v1",
-            api_key=os.getenv("SILICONFLOW_API_KEY"),
-            model="Qwen/Qwen2.5-7B-Instruct",
+            base_url=config.SILICONFLOW_BASE_URL,
+            api_key=config.SILICONFLOW_API_KEY,
+            model=config.SILICONFLOW_LLM_MODEL,
             temperature=0.7,
         )
 
@@ -400,13 +418,27 @@ def bear_analyst(state: AgentState):
                 from langchain_community.vectorstores import FAISS
 
                 embeddings = OpenAIEmbeddings(
-                    base_url="https://api.siliconflow.cn/v1",
-                    api_key=os.getenv("SILICONFLOW_API_KEY"),
-                    model="BAAI/bge-large-en-v1.5"
+                    base_url=config.SILICONFLOW_BASE_URL,
+                    api_key=config.SILICONFLOW_API_KEY,
+                    model=config.SILICONFLOW_EMBED_MODEL,
+                    # BGE 模型上下文 512 token,langchain 默认批量=1000 容易触发 SiliconFlow 400
+                    chunk_size=10,
                 )
 
                 chunks = research_context.split("\n\n---\n\n")
-                documents = [Document(page_content=chunk) for chunk in chunks if chunk.strip()]
+                documents = []
+                _MAX_CHARS = 1200  # BGE 模型 512 token 限制,保险取 1200 字符
+                for _chunk in chunks:
+                    if not _chunk.strip():
+                        continue
+                    if len(_chunk) > _MAX_CHARS:
+                        _step = _MAX_CHARS - 100
+                        for _i in range(0, len(_chunk), _step):
+                            _sub = _chunk[_i:_i + _MAX_CHARS]
+                            if _sub.strip():
+                                documents.append(Document(page_content=_sub))
+                    else:
+                        documents.append(Document(page_content=_chunk))
 
                 if len(documents) > 0:
                     if len(documents) > 30:
@@ -478,9 +510,9 @@ def bear_analyst(state: AgentState):
                     print(f"[BearAnalyst] Keyword filter: {len(chunks)} -> {len(relevant_chunks)} bearish chunks")
 
         llm = ChatOpenAI(
-            base_url="https://api.siliconflow.cn/v1",
-            api_key=os.getenv("SILICONFLOW_API_KEY"),
-            model="Qwen/Qwen2.5-7B-Instruct",
+            base_url=config.SILICONFLOW_BASE_URL,
+            api_key=config.SILICONFLOW_API_KEY,
+            model=config.SILICONFLOW_LLM_MODEL,
             temperature=0.7,
         )
 
@@ -570,9 +602,9 @@ def debater_node(state: AgentState):
             }
 
         llm = ChatOpenAI(
-            base_url="https://api.siliconflow.cn/v1",
-            api_key=os.getenv("SILICONFLOW_API_KEY"),
-            model="Qwen/Qwen2.5-7B-Instruct",
+            base_url=config.SILICONFLOW_BASE_URL,
+            api_key=config.SILICONFLOW_API_KEY,
+            model=config.SILICONFLOW_LLM_MODEL,
             temperature=0.5,
         )
 
@@ -655,141 +687,6 @@ Please provide COMPLETE financial analysis with mandatory sections.
 
 # -----------------------------
 # Revenue Visualization Node
-# -----------------------------
-
-def revenue_visualizer(state: AgentState):
-    """
-    Extract financial data from analyses and create revenue trend visualization.
-    """
-    print("[RevenueVisualizer] Generating revenue trend visualization")
-
-    try:
-        import re
-
-        # Extract all messages to find financial data
-        messages = state.get("messages", [])
-        bull_analysis = state.get("bull_analysis", "")
-        bear_analysis = state.get("bear_analysis", "")
-
-        # Combine all content
-        all_content = bull_analysis + "\n" + bear_analysis
-
-        # Extract revenue data with regex patterns
-        # Pattern: $XXX billion, XXX YoY, Q1/Q2/Q3/Q4, 20XX/2025/2026
-        revenue_pattern = r'\$(\d+(?:\.\d+)?)\s*(?:billion|B)(?:\s+\(|,| |[^\d])'
-        year_pattern = r'(20\d{2}|FY\d+|Q[1-4])'
-        yoy_pattern = r'(\d+(?:\.\d+)?)\s*%\s*(?:YoY|year\s*over\s*year|growth)'
-
-        # Find all revenue mentions with surrounding context
-        revenues = []
-        contexts = []
-
-        # Look for patterns like "$XXX billion, up XX% YoY"
-        combined_pattern = r'\$(\d+(?:\.\d+)?)\s*billion[^.]*?(\d+(?:\.\d+)?)\s*%\s*(?:YoY|year over year|growth)'
-        matches = re.finditer(combined_pattern, all_content, re.IGNORECASE)
-
-        for match in matches:
-            try:
-                revenue = float(match.group(1))
-                yoy = float(match.group(2))
-                revenues.append({
-                    'value': revenue,
-                    'yoy': yoy,
-                    'source': all_content[max(0, match.start()-50):match.start()].split('\n')[-1][:30]
-                })
-            except:
-                pass
-
-        # If no combined patterns found, try individual patterns
-        if not revenues:
-            for match in re.finditer(revenue_pattern, all_content):
-                try:
-                    revenue = float(match.group(1))
-                    revenues.append({'value': revenue, 'yoy': None, 'source': 'extracted'})
-                except:
-                    pass
-
-        # Create visualization
-        if revenues:
-            print(f"[RevenueVisualizer] Found {len(revenues)} revenue data points")
-
-            # Sort by revenue value for better visualization
-            revenues_sorted = sorted(revenues, key=lambda x: x['value'])
-
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-            fig.suptitle('Apple Inc. Financial Analysis - Revenue Insights', fontsize=14, fontweight='bold')
-
-            # Chart 1: Revenue values
-            revenue_values = [r['value'] for r in revenues_sorted]
-            revenue_labels = [f"${r['value']:.1f}B" for r in revenues_sorted]
-            colors = ['#34C759' if r['yoy'] and r['yoy'] > 0 else '#FF453A' for r in revenues_sorted]
-
-            bars = ax1.barh(range(len(revenue_values)), revenue_values, color=colors, alpha=0.7, edgecolor='black')
-            ax1.set_yticks(range(len(revenue_values)))
-            ax1.set_yticklabels([f"Data Point {i+1}" for i in range(len(revenue_values))])
-            ax1.set_xlabel('Revenue (Billion USD)', fontweight='bold')
-            ax1.set_title('Revenue Data Points Extracted', fontweight='bold')
-            ax1.grid(axis='x', alpha=0.3)
-
-            # Add value labels on bars
-            for i, (bar, label) in enumerate(zip(bars, revenue_labels)):
-                ax1.text(bar.get_width() + 1, bar.get_y() + bar.get_height()/2, label,
-                        va='center', fontsize=9, fontweight='bold')
-
-            # Chart 2: YoY Growth Rate (if available)
-            yoy_data = [r['yoy'] for r in revenues_sorted if r['yoy'] is not None]
-            if yoy_data:
-                yoy_labels = [f"Growth {i+1}" for i in range(len(yoy_data))]
-                colors_yoy = ['#34C759' if y > 0 else '#FF453A' for y in yoy_data]
-
-                bars2 = ax2.bar(range(len(yoy_data)), yoy_data, color=colors_yoy, alpha=0.7, edgecolor='black')
-                ax2.set_xticks(range(len(yoy_data)))
-                ax2.set_xticklabels([f"G{i+1}" for i in range(len(yoy_data))])
-                ax2.set_ylabel('YoY Growth Rate (%)', fontweight='bold')
-                ax2.set_title('Year-over-Year Growth Rates', fontweight='bold')
-                ax2.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
-                ax2.grid(axis='y', alpha=0.3)
-
-                # Add percentage labels on bars
-                for bar, rate in zip(bars2, yoy_data):
-                    height = bar.get_height()
-                    ax2.text(bar.get_x() + bar.get_width()/2., height + (1 if height > 0 else -3),
-                            f'{rate:.1f}%', ha='center', va='bottom' if height > 0 else 'top',
-                            fontsize=9, fontweight='bold')
-            else:
-                ax2.text(0.5, 0.5, 'YoY Growth Data\nNot Available',
-                        ha='center', va='center', transform=ax2.transAxes,
-                        fontsize=12, style='italic', color='gray')
-                ax2.set_xticks([])
-                ax2.set_yticks([])
-
-            plt.tight_layout()
-
-            # Save figure
-            output_path = 'd:/LC/revenue_analysis.png'
-            plt.savefig(output_path, dpi=100, bbox_inches='tight')
-            print(f"[RevenueVisualizer] Chart saved to: {output_path}")
-            plt.close()
-
-            visualization_msg = f"Revenue Visualization Generated\n- Data Points Extracted: {len(revenues)}\n- Chart saved to: revenue_analysis.png"
-        else:
-            print("[RevenueVisualizer] No revenue data found for visualization")
-            visualization_msg = "No revenue data found in analyses for visualization"
-
-        return {
-            "messages": state["messages"] + [AIMessage(content=f"[VISUALIZATION]\n{visualization_msg}")]
-        }
-
-    except Exception as e:
-        print(f"[RevenueVisualizer] Visualization failed: {str(e)}")
-        return {
-            "messages": state["messages"] + [AIMessage(content=f"Visualization error: {str(e)}")],
-            "failure_reason": f"Visualization failed: {str(e)}"
-        }
-
-
-# -----------------------------
-# Quality Inspector
 # -----------------------------
 
 def quality_inspector(state: AgentState):
@@ -1038,6 +935,189 @@ def quality_inspector(state: AgentState):
 # Reflection Agent
 # -----------------------------
 
+
+
+def _extract_structured_revenue(bull: str, bear: str, llm) -> list:
+    """让 LLM 从多头/空头分析中提取结构化营收数据。
+    返回 [{period, revenue_billion, yoy_percent}, ...];失败返回空列表。
+    容忍 LLM 输出:markdown fence (\`\`\`json)、前后解释性文字、中文标点等。"""
+    import json, re as _re
+
+    def _clean(text):
+        text = (text or "").strip()
+        # 剥 markdown ```json ... ``` 围栏
+        fence = _re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, _re.S)
+        if fence:
+            return fence.group(1).strip()
+        # 找首个 '[' 到末尾最后一个 ']' (含跨行)
+        start = text.find("[")
+        end = text.rfind("]")
+        if start != -1 and end != -1 and end > start:
+            return text[start:end + 1]
+        return text
+
+    def _try_parse(text):
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+        cleaned = (text or "")
+        cleaned = cleaned.replace("\u201c", '"').replace("\u201d", '"').replace("\u2018", "'").replace("\u2019", "'")
+        cleaned = _re.sub(r",\s*([\]])", r"\1", cleaned)  # 去尾部逗号
+        try:
+            return json.loads(cleaned)
+        except Exception:
+            return None
+
+    prompt = (
+        "你是一名数据提取助手。请从下面的多头/空头分析中提取该公司的营收数据点。\n"
+        "只输出一个 JSON 数组,前后不要任何其它文字、不要 markdown 包装、不要代码块标记。\n"
+        "格式:[{\"period\":\"FY2024\",\"revenue_billion\":391.0,\"yoy_percent\":2.0}]\n"
+        "其中:period 用 FY20XX 或 QXX 20XX;revenue_billion 与 yoy_percent 必须是数字(null 表示未知)。\n\n"
+        f"[多头分析]\n{(bull or '')[:3000]}\n\n[空头分析]\n{(bear or '')[:3000]}"
+    )
+    try:
+        resp = llm.invoke([HumanMessage(content=prompt)])
+        text = _clean(resp.content or "")
+        data = _try_parse(text)
+        if isinstance(data, list):
+            out = []
+            for it in data:
+                if not isinstance(it, dict):
+                    continue
+                rev = it.get("revenue_billion")
+                yoy = it.get("yoy_percent")
+                out.append({
+                    "period": str(it.get("period", f"#{len(out)+1}")),
+                    "revenue_billion": float(rev) if isinstance(rev, (int, float)) else 0.0,
+                    "yoy_percent": float(yoy) if isinstance(yoy, (int, float)) else None,
+                })
+            return out
+    except Exception as e:
+        print(f"[RevenueVisualizer] 结构化抽取失败: {e}")
+    return []
+
+
+def _fallback_regex_revenue(all_content: str) -> list:
+    """正则兜底:抽取 $X billion / X% YoY 数据点(兼容旧项目逻辑)。"""
+    import re as _re
+    out = []
+    pat = r"\$(\d+(?:\.\d+)?)\s*billion[^.]*?(\d+(?:\.\d+)?)\s*%\s*(?:YoY|year over year|growth)"
+    for m in _re.finditer(pat, all_content, _re.IGNORECASE):
+        try:
+            out.append({"value": float(m.group(1)), "yoy": float(m.group(2))})
+        except Exception:
+            pass
+    if not out:
+        pat2 = r"\$(\d+(?:\.\d+)?)\s*(?:billion|B)"
+        for m in _re.finditer(pat2, all_content):
+            try:
+                out.append({"value": float(m.group(1)), "yoy": None})
+            except Exception:
+                pass
+    return out
+
+
+def _render_revenue_chart(company_name: str, items: list) -> str:
+    """画营收图(与 tools.draw_chart 渲染一致)。items 元素为
+    {period, revenue_billion, yoy_percent} 或 {period, value, yoy}。"""
+    config.ensure_dirs()
+    periods = [str(it.get("period", f"#{i+1}")) for i, it in enumerate(items)]
+    values = [float(it.get("revenue_billion", it.get("value", 0)) or 0) for it in items]
+    yoys = [it.get("yoy_percent", it.get("yoy")) for it in items]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle(f"{company_name} Financial Analysis - Revenue Insights", fontsize=14, fontweight="bold")
+
+    colors = ["#34C759" if (y is not None and y > 0) else "#FF453A" for y in yoys]
+    ax1.barh(range(len(values)), values, color=colors, alpha=0.75, edgecolor="black")
+    ax1.set_yticks(range(len(values)))
+    ax1.set_yticklabels(periods)
+    ax1.set_xlabel("Revenue (Billion USD)", fontweight="bold")
+    ax1.set_title("Revenue by Period", fontweight="bold")
+    ax1.grid(axis="x", alpha=0.3)
+    for i, v in enumerate(values):
+        ax1.text(v + max(values) * 0.01 + 0.5, i, f"${v:.1f}B", va="center", fontsize=9, fontweight="bold")
+
+    yoy_data = [float(y) for y in yoys if y is not None]
+    if yoy_data:
+        colors_yoy = ["#34C759" if y > 0 else "#FF453A" for y in yoy_data]
+        ax2.bar(range(len(yoy_data)), yoy_data, color=colors_yoy, alpha=0.75, edgecolor="black")
+        ax2.axhline(y=0, color="black", linestyle="-", linewidth=0.5)
+        ax2.set_ylabel("YoY Growth (%)", fontweight="bold")
+        ax2.set_title("Year-over-Year Growth", fontweight="bold")
+        ax2.set_xticks(range(len(yoy_data)))
+        ax2.set_xticklabels([p for p, y in zip(periods, yoys) if y is not None])
+        ax2.grid(axis="y", alpha=0.3)
+        for i, y in enumerate(yoy_data):
+            ax2.text(i, y + (1 if y > 0 else -3), f"{y:.1f}%", ha="center", fontsize=9, fontweight="bold")
+    else:
+        ax2.text(0.5, 0.5, "YoY Growth Data\nNot Available", ha="center", va="center",
+                 transform=ax2.transAxes, fontsize=12, style="italic", color="gray")
+        ax2.set_xticks([])
+        ax2.set_yticks([])
+
+    plt.tight_layout()
+    path = os.path.join(config.OUTPUT_DIR, f"{config.safe_filename(company_name)}_revenue_analysis.png")
+    plt.savefig(path, dpi=100, bbox_inches="tight")
+    plt.close()
+    return path
+
+
+def revenue_visualizer(state: AgentState):
+    """生成营收可视化:优先 LLM 结构化抽取,失败则正则兜底;渲染与 tools.draw_chart 一致。"""
+    print("[RevenueVisualizer] Generating revenue trend visualization")
+    try:
+        messages = state.get("messages", [])
+        bull_analysis = state.get("bull_analysis", "")
+        bear_analysis = state.get("bear_analysis", "")
+        company_name = (
+            messages[0].content
+            if messages and isinstance(messages[0], HumanMessage)
+            else "Unknown"
+        )
+
+        # 1) 优先:LLM 结构化抽取
+        llm = ChatOpenAI(
+            base_url=config.SILICONFLOW_BASE_URL,
+            api_key=config.SILICONFLOW_API_KEY,
+            model=config.SILICONFLOW_LLM_MODEL,
+            temperature=0.0,
+        )
+        items = _extract_structured_revenue(bull_analysis, bear_analysis, llm)
+        if items and isinstance(items, list):
+            print(f"[RevenueVisualizer] LLM 抽取到 {len(items)} 个数据点")
+            path = _render_revenue_chart(company_name, items)
+            visualization_msg = f"Revenue Visualization Generated\n- Data Points: {len(items)}\n- Chart: {path}"
+        else:
+            # 2) 兜底:正则抽取
+            legacy = _fallback_regex_revenue(bull_analysis + "\n" + bear_analysis)
+            if legacy:
+                normalized = [
+                    {"period": f"#{i+1}", "revenue_billion": r["value"], "yoy_percent": r.get("yoy")}
+                    for i, r in enumerate(legacy)
+                ]
+                path = _render_revenue_chart(company_name, normalized)
+                visualization_msg = (
+                    f"Revenue Visualization (regex fallback)\n"
+                    f"- Data Points: {len(legacy)}\n- Chart: {path}"
+                )
+            else:
+                print("[RevenueVisualizer] No revenue data found in analyses")
+                visualization_msg = "No revenue data found in analyses for visualization"
+                path = None
+
+        return {
+            "messages": state["messages"] + [AIMessage(content=f"[VISUALIZATION]\n{visualization_msg}")]
+        }
+    except Exception as e:
+        print(f"[RevenueVisualizer] Visualization failed: {str(e)}")
+        return {
+            "messages": state["messages"] + [AIMessage(content=f"Visualization error: {str(e)}")],
+            "failure_reason": f"Visualization failed: {str(e)}",
+        }
+
+
 def reflect(state: AgentState):
 
     print("[Reflect] Running reflection")
@@ -1048,9 +1128,9 @@ def reflect(state: AgentState):
         iteration = current_iteration + 1
 
         llm = ChatOpenAI(
-            base_url="https://api.siliconflow.cn/v1",
-            api_key=os.getenv("SILICONFLOW_API_KEY"),
-            model="Qwen/Qwen2.5-7B-Instruct",
+            base_url=config.SILICONFLOW_BASE_URL,
+            api_key=config.SILICONFLOW_API_KEY,
+            model=config.SILICONFLOW_LLM_MODEL,
             temperature=0.5,
         )
 

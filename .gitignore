@@ -4,3 +4,8 @@ __pycache__/
 .idea/
 .vscode/
 
+# 运行时产物
+output/
+kb_index/
+long_term_memory.json
+
